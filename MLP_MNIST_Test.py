@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 np.set_printoptions(linewidth=1000, threshold=100000)
 (x_train, t_train), (x_test, t_test) = load_mnist(normalize=True, one_hot_label=True)
 
-with open('MLP_Prams.pkl', 'rb') as f:
+with open('data/test/MLP_Prams.pkl', 'rb') as f:
     net_MLP = pickle.load(f)
 
 sample=x_test[4]

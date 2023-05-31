@@ -3,6 +3,8 @@ import sys, os
 
 sys.path.append(os.pardir)  # 부모 디렉터리의 파일을 가져올 수 있도록 설정
 import numpy as np
+import logging
+
 from collections import OrderedDict
 from common.layers import *
 
@@ -11,7 +13,8 @@ from common.layers import *
 class MLP:
 
     def __init__(self, input_size, hidden_size_list, output_size,
-                 activation='relu', weight_decay_lambda=0, weight_init_std=0.01):
+                 activation='relu', weight_decay_lambda=0, weight_init_std=0.01,
+                 use_dropout=False, dropout_ration=0.5, use_batchnorm=False):
         self.input_size = input_size
         self.output_size = output_size
         self.hidden_size_list = hidden_size_list
@@ -22,9 +25,14 @@ class MLP:
         self.y = None  # softmax의 출력
         self.t = None  # 정답 레이블(원-핫 인코딩 형태)
         self. weight_init_std = weight_init_std
+        self.use_dropout = use_dropout
+        self.use_batchnorm = use_batchnorm
+        self.dropout_ration = dropout_ration
+
 
         # 가중치 초기화
         self.__init_weight()
+
 
         # 계층 생성
         activation_layer = {'relu': Relu}
@@ -34,8 +42,19 @@ class MLP:
             # 사용자가 지정한 layer의 크기만큼 layers가 생성된다
             self.layers['Affine' + str(idx)] = Affine(self.params['W' + str(idx)],
                                                       self.params['b' + str(idx)])
+
+            if self.use_batchnorm:
+                self.params['gamma' + str(idx)] = np.ones(hidden_size_list[idx - 1])
+                self.params['beta' + str(idx)] = np.zeros(hidden_size_list[idx - 1])
+                self.layers['BatchNorm' + str(idx)] = BatchNormalization(self.params['gamma' + str(idx)],
+                                                                         self.params['beta' + str(idx)])
+
             # Relu 클래스의 인스턴스가 layers에 담기게 된다
             self.layers['Activation_function' + str(idx)] = activation_layer[activation]()
+
+            if self.use_dropout:
+                self.layers['Dropout' + str(idx)] = Dropout(dropout_ration)
+
         # 마지막 -1 층까지 만들어준다
         idx = self.hidden_layer_num + 1
         self.layers['Affine' + str(idx)] = Affine(self.params['W' + str(idx)],
@@ -52,22 +71,35 @@ class MLP:
 
             # 표준정규 분포를 따라서 행렬을 만든다 처음은 784x100 행렬을 만들고 scale을 곱해줘라
             # 그러면 N(0, scale) 값으로 바뀌게 된다 (N은 정규분포를 의미)
-            self.params['W' + str(idx)] = self.weight_init_std * np.random.randn(all_size_list[idx - 1], all_size_list[idx])
-            print("W inint")
-            print(self.params['W' + str(idx)])
+            self.params['W' + str(idx)] = scale * np.random.randn(all_size_list[idx - 1], all_size_list[idx])
             self.params['b' + str(idx)] = np.random.randn(all_size_list[idx])
-            print("b inint")
-            print(self.params['b' + str(idx)])
 
-    def predict(self, x):
-        for layer in self.layers.values():
+    def predict(self, x, train_flg=False):
+        for key, layer in self.layers.items():
             x = layer.forward(x)
 
         return x
 
-    def loss_function(self, x, t):
-        y = self.predict(x)
-        return self.softmax_forward(y, t)
+    def loss_function(self, x, t, train_flg=False):
+        """손실 함수를 구한다.
+
+        Parameters
+        ----------
+        x : 입력 데이터
+        t : 정답 레이블
+        """
+        y = self.predict(x, train_flg)
+
+        # L2 패널티를 나타낸다
+        weight_decay = 0
+        # 3개의 층이므로 1 ~ 4 까지 반복한다
+        for idx in range(1, self.hidden_layer_num + 2):
+            W = self.params['W' + str(idx)]
+            # <L2 패널티>, 람다식에 대한 총합을 나타낸다
+            weight_decay += 0.5 * self.weight_decay_lambda * np.sum(W ** 2)
+
+        # softmax_forward는 not-likelyhood의 값을 나타냄 + L2 패널티 값 == not likelyhood결과
+        return self.softmax_forward(y, t) + weight_decay
 
     def softmax_forward(self, x, t):
         self.t = t
@@ -77,7 +109,7 @@ class MLP:
 
         return self.loss
 
-    def loss_backward(self, x, t):
+    def loss_for_backward(self):
         batch_size = self.t.shape[0]
         if self.t.size == self.y.size:  # 정답 레이블이 원-핫 인코딩 형태일 때
             dx = (self.y - self.t) / batch_size
@@ -96,6 +128,7 @@ class MLP:
         accuracy = np.sum(y == t) / float(x.shape[0])
         return accuracy
 
+    # Backward에 해당
     def gradient(self, x, t):
         """기울기를 구한다(오차역전파법).
 
@@ -111,23 +144,33 @@ class MLP:
             grads['b1']、grads['b2']、... 각 층의 편향
         """
         # forward
-        self.loss_function(x, t)
+        self.loss_function(x, t, train_flg=True)
+
 
         # backward (맨 마지막은 흘러 들어오는 게 없음)
         # dout = 1
         # 크로스 엔트로피만 고려해서 역전파로 기울기를 넘겨주는 것임
         # 여기서 loss까지 같이 계산되므로 위해서 loss_backward를 할 필요가 없다
-        dout = self.loss_backward(x,t)
+        dout = self.loss_for_backward()
 
         layers = list(self.layers.values())
         layers.reverse()
         for layer in layers:
             dout = layer.backward(dout)
 
+
         # Result
         grads = {}
         for idx in range(1, self.hidden_layer_num + 2):
-            grads['W' + str(idx)] = self.layers['Affine' + str(idx)].dW
+            grads['W' + str(idx)] = self.layers['Affine' + str(idx)].dW + self.weight_decay_lambda * self.params[
+                'W' + str(idx)]
             grads['b' + str(idx)] = self.layers['Affine' + str(idx)].db
+            grads['b' + str(idx)] = self.layers['Affine' + str(idx)].db
+
+            if self.use_batchnorm and idx != self.hidden_layer_num + 1:
+                grads['gamma' + str(idx)] = self.layers['BatchNorm' + str(idx)].dgamma
+                grads['beta' + str(idx)] = self.layers['BatchNorm' + str(idx)].dbeta
+
+
         return grads
 

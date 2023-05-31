@@ -3,6 +3,7 @@ sys.path.append(os.pardir)
 import numpy as np
 import pickle
 from dataset.mnist import load_mnist
+
 np.set_printoptions(linewidth=1000, threshold=100000)
 
 with open("neuralnet.pkl", 'rb') as f:
